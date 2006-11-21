@@ -179,10 +179,10 @@ int send_message(Window w_P, const char *message_P, Display *disp, Window handle
 	return ok;
 }
 
-int send_next_message(const char *msg)
+int send_next_message(string msg)
 {
 	string message("#");
-	std::ostringstream o;
+	ostringstream o;
 	o << sequence_number;
 	message.append(o.str());
 	message.append(" ");
@@ -192,6 +192,25 @@ int send_next_message(const char *msg)
 	return send_message(skype_win, message.c_str(), xdisp, win);
 }
 
+bool check_sequence(string msg, string &out)
+{
+	if(msg[0] != '#')
+	{
+		out = msg;
+		return false; // we didn't ask for this, pass thru
+	}
+
+	int n;
+	string sub(msg.substr(1, msg.find(" ")));
+	istringstream i(sub);
+	i >> n;
+	if(n != sequence_number-1)
+		exit(EXIT_FAILURE); // we're out of sync, better die
+
+	string final(msg.substr(msg.find(" ")+1));
+	out = final;
+	return true;
+}
 
 //
 // Escape arguments to HTTP POST.
@@ -240,6 +259,23 @@ long post_mood_for(string skypename, string mood, string lang)
 //
 void handle_message(Window wid, string message)
 {
+	if(clientState == CONNECTING)
+	{
+		string out;
+		if(check_sequence(message, out))
+		{
+			if(out == "OK")
+			{
+				clientState = CONNECTED;
+				send_next_message("PROTOCOL 5");
+			}
+			else
+				running = false; // fsm:CD, die off at once
+		}
+	}
+	else
+	{
+	}
 	fprintf(stdout, "%s\n", message.c_str());
 }
 
@@ -308,13 +344,13 @@ void sighandler()
 //
 int main(int argc, char *argv[])
 {
-	int fid = fork();
-
-	if(fid == -1)
-		error("Failed to fork.");
-
-	if(fid != 0)
-		exit(EXIT_SUCCESS); // started a child, now die off
+// 	int fid = fork();
+//
+// 	if(fid == -1)
+// 		error("Failed to fork.");
+//
+// 	if(fid != 0)
+// 		exit(EXIT_SUCCESS); // started a child, now die off
 
 	// child process
 	// TODO: detach all console stuff
