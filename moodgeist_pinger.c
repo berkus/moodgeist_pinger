@@ -15,10 +15,17 @@
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <curl/curl.h>
+#include <iostream>
+#include <sstream>
 #include <string>
 #include <map>
 
 using namespace std;
+
+// FSM states:
+// Skype status: Present (SP), Not Present (SNP)
+// Client status: Connected (CC), Not Connected (CNC) - aka Connecting, Denied (CD) - immediate quit
+enum ClientState { CONNECTING, CONNECTED } clientState;
 
 // Global variables (omgwtf!).
 CURL *curl = 0;
@@ -29,6 +36,7 @@ Atom atom1, atom2;
 Window win = (Window)-1; // our message handling window
 Window skype_win = (Window)-1;
 std::map<Window, std::string> incoming_messages;
+int sequence_number = 1;
 
 // Write to log file only if it already exists.
 void wlog(const char *format, ...)
@@ -76,7 +84,6 @@ void wlog(const char *format, ...)
 
 void error(const char *msg)
 {
-	fprintf(stderr, "%s\n", msg);
 	wlog("%s\n", msg);
 	exit(EXIT_FAILURE);
 }
@@ -164,10 +171,27 @@ int send_message(Window w_P, const char *message_P, Display *disp, Window handle
 	ok = untrap_errors();
 
 	if(!ok)
+	{
 		wlog("Sending X11 message failed with status %d\n", xerror);
+		skypePresent(disp); // error might be due to Skype wandering off
+	}
 
 	return ok;
 }
+
+int send_next_message(const char *msg)
+{
+	string message("#");
+	std::ostringstream o;
+	o << sequence_number;
+	message.append(o.str());
+	message.append(" ");
+	message.append(msg);
+
+	sequence_number++;
+	return send_message(skype_win, message.c_str(), xdisp, win);
+}
+
 
 //
 // Escape arguments to HTTP POST.
@@ -216,51 +240,60 @@ long post_mood_for(string skypename, string mood, string lang)
 //
 void handle_message(Window wid, string message)
 {
+	fprintf(stdout, "%s\n", message.c_str());
 }
 
 // Run X event loop until we receive Ctrl-C or signal.
 void run()
 {
 	XEvent ev;
-	while(running)
+	while(running) // outer loop handles fsm:SNP state
 	{
-		XNextEvent(xdisp, &ev);
-		if(ev.type != ClientMessage || ev.xclient.format != 8)
-			continue;
+		while(!skypePresent(xdisp)) // wait for fsm:SP
+			sleep(1);
 
-		// These are not the atoms you are looking for...
-		if(ev.xclient.message_type != atom1 && ev.xclient.message_type != atom2)
-			continue;
+		clientState = CONNECTING;
+		send_next_message("NAME moodgeist_pinger"); // kick protocol
 
-		char buf[21]; // can't be longer
-		int i;
-		for(i = 0; i < 20 && ev.xclient.data.b[i] != '\0'; ++i)
-			buf[i] = ev.xclient.data.b[i];
-
-		buf[i] = '\0';
-
-		if(incoming_messages.find(ev.xclient.window) != incoming_messages.end())
+		while(running && (skype_win != (Window)-1)) // inner loop handles fsm:SP state
 		{
-			if(ev.xclient.message_type == atom1 && atom1 != atom2)
-				// two different messages on the same window at the same time shouldn't happen anyway
-				incoming_messages[ev.xclient.window] = string();
+			XNextEvent(xdisp, &ev);
+			if(ev.type != ClientMessage || ev.xclient.format != 8)
+				continue;
 
-			incoming_messages[ev.xclient.window].append(buf);
+			// These are not the atoms you are looking for...
+			if(ev.xclient.message_type != atom1 && ev.xclient.message_type != atom2)
+				continue;
+
+			char buf[21]; // can't be longer
+			int i;
+			for(i = 0; i < 20 && ev.xclient.data.b[i] != '\0'; ++i)
+				buf[i] = ev.xclient.data.b[i];
+
+			buf[i] = '\0';
+
+			if(incoming_messages.find(ev.xclient.window) != incoming_messages.end())
+			{
+				if(ev.xclient.message_type == atom1 && atom1 != atom2)
+					// two different messages on the same window at the same time shouldn't happen anyway
+					incoming_messages[ev.xclient.window] = string();
+
+				incoming_messages[ev.xclient.window].append(buf);
+			}
+			else
+			{
+				if(ev.xclient.message_type == atom2 && atom1 != atom2)
+					continue; // middle of message, but we don't have the beginning, ignore
+
+				incoming_messages[ev.xclient.window] = buf;
+			}
+
+			if(i < 20) // last message fragment
+			{
+				handle_message(ev.xclient.window, incoming_messages[ev.xclient.window]);
+				incoming_messages.erase(ev.xclient.window);
+			}
 		}
-		else
-		{
-			if(ev.xclient.message_type == atom2 && atom1 != atom2)
-				continue; // middle of message, but we don't have the beginning, ignore
-
-			incoming_messages[ev.xclient.window] = buf;
-		}
-
-		if(i < 20) // last message fragment
-		{
-			handle_message(ev.xclient.window, incoming_messages[ev.xclient.window]);
-			incoming_messages.erase(ev.xclient.window);
-		}
-
 	}
 }
 
@@ -275,6 +308,17 @@ void sighandler()
 //
 int main(int argc, char *argv[])
 {
+	int fid = fork();
+
+	if(fid == -1)
+		error("Failed to fork.");
+
+	if(fid != 0)
+		exit(EXIT_SUCCESS); // started a child, now die off
+
+	// child process
+	// TODO: detach all console stuff
+
 	xdisp = XOpenDisplay(getenv("DISPLAY"));
 	if(!xdisp)
 		error("Cannot open display.");

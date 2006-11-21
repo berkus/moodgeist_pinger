@@ -1,0 +1,16 @@
+Moodgeist pinger for Linux Skype
+--------------------------------
+
+Requirements:
+ - libcurl
+
+Building:
+ - type make
+
+Running:
+ Run ./moodgeist_pinger. Pinger itself forks and detaches from console.
+ It will connect to Skype, the popup will show asking to allow access, press Yes.
+ If you press No, the pinger will immediately quit.
+ It will exit gracefully if you send it any signal, so `killall moodgeist_pinger` will do.
+
+Have fun!
