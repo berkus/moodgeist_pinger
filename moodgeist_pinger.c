@@ -27,6 +27,14 @@ using namespace std;
 // Client status: Connected (CC), Not Connected (CNC) - aka Connecting, Denied (CD) - immediate quit
 enum ClientState { CONNECTING, CONNECTED } clientState;
 
+struct UserData
+{
+	UserData() : mood_text(), language() {}
+	UserData(string mood, string lang) : mood_text(mood), language(lang) {}
+	string mood_text;
+	string language;
+};
+
 // Global variables (omgwtf!).
 CURL *curl = 0;
 string me;
@@ -35,8 +43,9 @@ Display *xdisp = 0;
 Atom atom1, atom2;
 Window win = (Window)-1; // our message handling window
 Window skype_win = (Window)-1;
-std::map<Window, std::string> incoming_messages;
+map<Window, string> incoming_messages;
 int sequence_number = 1;
+map<string, UserData> users;
 
 // Write to log file only if it already exists.
 void wlog(const char *format, ...)
@@ -204,7 +213,7 @@ bool check_sequence(string msg, string &out)
 	string sub(msg.substr(1, msg.find(" ")));
 	istringstream i(sub);
 	i >> n;
-	if(n != sequence_number-1)
+	if(n > sequence_number-1)
 		exit(EXIT_FAILURE); // we're out of sync, better die
 
 	string final(msg.substr(msg.find(" ")+1));
@@ -228,12 +237,17 @@ string escape_str(string in)
 	return str;
 }
 
+bool starts_with(string in, string prefix)
+{
+	return in.substr(0, prefix.size()) == prefix;
+}
+
 //
 // Send HTTP POST to moodgeist server.
 //
 long post_mood_for(string skypename, string mood, string lang)
 {
-	long response;
+	long response = 0;
 	string fld;
 
 	fld.append("protocol=1&skypename=");
@@ -259,9 +273,11 @@ long post_mood_for(string skypename, string mood, string lang)
 //
 void handle_message(Window wid, string message)
 {
+// 	fprintf(stdout, "%s\n", message.c_str());
+
+	string out;
 	if(clientState == CONNECTING)
 	{
-		string out;
 		if(check_sequence(message, out))
 		{
 			if(out == "OK")
@@ -275,8 +291,56 @@ void handle_message(Window wid, string message)
 	}
 	else
 	{
+		if(check_sequence(message, out)) // response to our request
+		{
+			if(out == "PROTOCOL 5")
+			{
+				send_next_message("SEARCH FRIENDS");
+			}
+			if(starts_with(out, "USERS"))
+			{
+				char buf[35]; // max skypename length is 32 bytes
+				istringstream is(out.substr(out.find(" ")+1));
+				is.setf(ios::skipws);
+				while(!is.eof())
+				{
+					is.getline(buf, sizeof(buf), ',');
+					send_next_message(string("GET USER ")+buf+" LANGUAGE");
+					send_next_message(string("GET USER ")+buf+" MOOD_TEXT");
+				}
+			}
+			if(starts_with(out, "USER "))
+			{
+				size_t lpos, mpos;
+				size_t start = out.find(" ") + 1;
+				size_t end = out.find(" ", start+1);
+
+				string name = out.substr(start, end - start);
+
+				if((lpos = out.find("LANGUAGE")) != string::npos)
+				{
+					users[name].language = out.substr(out.find(" ", lpos+1)+1, 2); // ISO language code
+				}
+				else
+				if((mpos = out.find("MOOD_TEXT")) != string::npos)
+				{
+					users[name].mood_text = out.substr(out.find(" ", mpos+1)+1);
+
+					if(!users[name].mood_text.empty())
+						post_mood_for(name, users[name].mood_text, users[name].language);
+				}
+
+			}
+		}
+		else
+		{
+			if(starts_with(message, "CURRENTUSERHANDLE"))
+			{
+				me = message.substr(message.find(" ")+1);
+				wlog("Identified myself as %s\n", me.c_str());
+			}
+		}
 	}
-	fprintf(stdout, "%s\n", message.c_str());
 }
 
 // Run X event loop until we receive Ctrl-C or signal.
@@ -344,13 +408,13 @@ void sighandler()
 //
 int main(int argc, char *argv[])
 {
-// 	int fid = fork();
-//
-// 	if(fid == -1)
-// 		error("Failed to fork.");
-//
-// 	if(fid != 0)
-// 		exit(EXIT_SUCCESS); // started a child, now die off
+	int fid = fork();
+
+	if(fid == -1)
+		error("Failed to fork.");
+
+	if(fid != 0)
+		exit(EXIT_SUCCESS); // started a child, now die off
 
 	// child process
 	// TODO: detach all console stuff
